@@ -1,9 +1,18 @@
 #include <Wire.h>
+#include <WiFi.h>
 
 #define ADDRESS_I2C 0x76
 #define REGISTER_id 0xD0
 #define REGISTER_ctrl_meas 0xF4
 #define REGISTER_ctrl_hum 0xF2
+
+const char* ssid     = "";
+const char* password = "";
+ 
+const char* server   = "api.thingspeak.com"; 
+String apiKey = "";
+
+WiFiClient client;
 
 uint8_t read_data[8];
 uint32_t temprature_raw, pressure_raw, humidity_raw;
@@ -35,6 +44,13 @@ struct calibration_t calibrations;
 
 void setup() {
   Serial.begin(115200);
+
+  WiFi.begin(ssid, password) ;
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\n\nWiFi connected.") ;
 
   Wire.begin(21,22);
 
@@ -98,7 +114,26 @@ void loop() {
   Serial.print(" P: ");
   Serial.println(pressure);
 
-  delay(1000);
+  if (client.connect(server, 80)) { 
+    String postStr = apiKey ;
+    postStr += "&field1=" + String(temprature);
+    postStr += "&field2=" + String(humidity);
+    postStr += "&field3=" + String(pressure);
+    postStr += "\r\n\r\n" ;
+ 
+    client.println("POST /update HTTP/1.1") ;
+    client.println("Host: api.thingspeak.com") ;
+    client.println("Connection: close") ;
+    client.println("X-THINGSPEAKAPIKEY: " + apiKey) ;
+    client.println("Content-Type: application/x-www-form-urlencoded") ;
+    client.print("Content-Length: ") ;
+    client.println(postStr.length()) ;
+    client.println("") ;
+    client.print(postStr) ;
+  }
+  client.stop();
+ 
+  delay(30 * 1000);
   
   }
 
