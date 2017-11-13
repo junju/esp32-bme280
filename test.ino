@@ -1,7 +1,15 @@
 #include <Wire.h>
+#include <WiFi.h>
 
 #define BME280_ADDRESS 0x76
 
+static const char* ssid     = "";
+static const char* password = "";
+ 
+static const char* server   = "api.thingspeak.com"; 
+String apiKey = "";
+
+WiFiClient client;
 
 struct calibration_t{
 uint16_t dig_T1;
@@ -65,12 +73,20 @@ void setup()
     writeReg(0xF5,config_reg);
     
     readTrim(calibrations);                    //
+
+  WiFi.begin(ssid, password) ;
+  while (WiFi.status() != WL_CONNECTED){
+    delay(500);
+    Serial.print(WiFi.status());
+  }
+  Serial.println("\n\nWiFi connected.") ;
+
 }
 
 
 void loop()
 {
-    double temp_act = 0.0, press_act = 0.0,hum_act=0.0;
+    double temperature = 0.0, pressure = 0.0,humidity = 0.0;
     signed long int temp_cal;
     unsigned long int press_cal,hum_cal;
     
@@ -79,18 +95,40 @@ void loop()
     temp_cal = calibration_T(rawData->temperature_raw, calibrations);
     press_cal = calibration_P(rawData->pressure_raw, calibrations);
     hum_cal = calibration_H(rawData->humminity_raw, calibrations);
-    temp_act = (double)temp_cal / 100.0;
-    press_act = (double)press_cal / 100.0;
-    hum_act = (double)hum_cal / 1024.0;
+    temperature = (double)temp_cal / 100.0;
+    pressure = (double)press_cal / 100.0;
+    humidity = (double)hum_cal / 1024.0;
     Serial.print("TEMP : ");
-    Serial.print(temp_act);
+    Serial.print(temperature);
     Serial.print(" DegC  PRESS : ");
-    Serial.print(press_act);
+    Serial.print(pressure);
     Serial.print(" hPa  HUM : ");
-    Serial.print(hum_act);
+    Serial.print(humidity);
     Serial.println(" %");    
+
+    if (client.connect(server, 80)) { 
+    String postStr = apiKey ;
+    postStr += "&field1=" + String(temperature);
+    postStr += "&field2=" + String(humidity);
+    postStr += "&field3=" + String(pressure);
+    postStr += "\r\n\r\n" ;
+ 
+    client.println("POST /update HTTP/1.1") ;
+    client.println("Host: api.thingspeak.com") ;
+    client.println("Connection: close") ;
+    client.println("X-THINGSPEAKAPIKEY: " + apiKey) ;
+    client.println("Content-Type: application/x-www-form-urlencoded") ;
+    client.print("Content-Length: ") ;
+    client.println(postStr.length()) ;
+    client.println("") ;
+    client.print(postStr) ;
+  }
+  client.stop();
+ 
+  delay(30 * 1000);
+  
     
-    delay(1000);
+    //delay(1000);
 }
 void readTrim(struct calibration_t* calibrations)
 {
