@@ -1,309 +1,222 @@
 #include <Wire.h>
-#include <WiFi.h>
 
-#define ADDRESS_I2C 0x76
-#define REGISTER_id 0xD0
-#define REGISTER_ctrl_meas 0xF4
-#define REGISTER_ctrl_hum 0xF2
+#define BME280_ADDRESS 0x76
 
-const char* ssid     = "";
-const char* password = "";
- 
-const char* server   = "api.thingspeak.com"; 
-String apiKey = "";
 
-WiFiClient client;
-
-uint8_t read_data[8];
-uint32_t temprature_raw, pressure_raw, humidity_raw;
-double temprature, humidity, pressure;
-
-struct calibration_t {
-  uint16_t dig_T1;
-  int16_t dig_T2;
-  int16_t dig_T3;
-  uint16_t dig_P1;
-  int16_t dig_P2;
-  int16_t dig_P3;
-  int16_t dig_P4;
-  int16_t dig_P5;
-  int16_t dig_P6;
-  int16_t dig_P7;
-  int16_t dig_P8;
-  int16_t dig_P9;
-  uint8_t dig_H1;
-  int16_t dig_H2;
-  uint8_t dig_H3;
-  int16_t dig_H4;
-  int16_t dig_H5;
-  int8_t  dig_H6;
-  int32_t t_fine;
+struct calibration_t{
+uint16_t dig_T1;
+ int16_t dig_T2;
+ int16_t dig_T3;
+uint16_t dig_P1;
+ int16_t dig_P2;
+ int16_t dig_P3;
+ int16_t dig_P4;
+ int16_t dig_P5;
+ int16_t dig_P6;
+ int16_t dig_P7;
+ int16_t dig_P8;
+ int16_t dig_P9;
+ int8_t  dig_H1;
+ int16_t dig_H2;
+ int8_t  dig_H3;
+ int16_t dig_H4;
+ int16_t dig_H5;
+ int8_t  dig_H6;
+ signed long int t_fine;
 };
 
-struct calibration_t calibrations;
+struct rawData_t{
+  unsigned long int humminity_raw,temperature_raw,pressure_raw;
+};
 
-void setup() {
-  Serial.begin(115200);
+struct calibration_t inits = {
+  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+  };
 
-  WiFi.begin(ssid, password) ;
-  while (WiFi.status() != WL_CONNECTED){
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("\n\nWiFi connected.") ;
+struct rawData_t inits_rawData = {
+  0,0,0
+};
 
-  Wire.begin(21,22);
+struct calibration_t* calibrations;
+struct rawData_t* rawData;
 
-  // デバイスIDの表示
-  Wire.beginTransmission(ADDRESS_I2C);
-  Wire.write(REGISTER_id);
-  Wire.endTransmission(false);
-  Wire.requestFrom(ADDRESS_I2C, 1, false);
-
-  Serial.print("Device id is 0x");
-  Serial.println(Wire.read(),HEX);
-
-  Wire.endTransmission(true);
-
-  // 校正データの読み込み
-  calibrations = getCalibrationData();  
-
-  // configレジスタをセット
-  // リセット時Ox00
-  
-  // ctrl_measレジスタをセット
-  Wire.beginTransmission(ADDRESS_I2C);
-  Wire.write(REGISTER_ctrl_meas);
-  Wire.write(B00100111);
-  Wire.endTransmission(true);
-
-  // ctrl_humレジスタをセット
-  Wire.beginTransmission(ADDRESS_I2C);
-  Wire.write(REGISTER_ctrl_hum);
-  Wire.write(B00000001);
-  Wire.endTransmission(true);  
-
+void setup()
+{
+    uint8_t osrs_t = B010;             //Temperature oversampling x 2
+    uint8_t osrs_p = B101;             //Pressure oversampling x 16
+    uint8_t osrs_h = B001;             //Humidity oversampling x 1
+    uint8_t mode = B11;               //Normal mode
+    uint8_t t_sb = B000;               //Tstandby 0.5ms
+    uint8_t filter = B100;             //Filter on 
+    uint8_t spi3w_en = 0;           //3-wire SPI Disable
+    
+    uint8_t ctrl_meas_reg = (osrs_t << 5) | (osrs_p << 2) | mode;
+    uint8_t config_reg    = (t_sb << 5) | (filter << 2) | spi3w_en;
+    uint8_t ctrl_hum_reg  = osrs_h;
+    
+    calibrations = &inits;
+    rawData = &inits_rawData;
+    
+    Serial.begin(115200);
+    Wire.begin(21,22);
+    
+    writeReg(0xF2,ctrl_hum_reg);
+    writeReg(0xF4,ctrl_meas_reg);
+    writeReg(0xF5,config_reg);
+    
+    readTrim(calibrations);                    //
 }
 
-void loop() {
-  
-  // センサデータ読み込み 
-  Wire.beginTransmission(ADDRESS_I2C);
-  Wire.write(0xF7);
-  Wire.endTransmission(false);
-  Wire.requestFrom(ADDRESS_I2C, 8, false);
-  
-  for (int i =0; i < sizeof(read_data); i++){
-    read_data[i] = Wire.read();
-  }
-  
-  Wire.endTransmission(true);
 
-  temprature_raw = read_data[3] << 12 | read_data[4] << 4 | read_data[5] >> 4;
-  humidity_raw  = read_data[6] << 8 | read_data[7];
-  pressure_raw = read_data[0] << 12 | read_data[1] << 4 | read_data[2] >> 4;
-
-  temprature = (double)compensateTemperature(temprature_raw, &calibrations)/100.0;
-  humidity = (double)compensateHumidity(humidity_raw, &calibrations)/1024.0;
-  pressure = (double)compensatePressure(pressure_raw, &calibrations)/100.0;
-  
-  Serial.print(" T: ");
-  Serial.print(temprature);
-  Serial.print(" H: ");
-  Serial.print(humidity);
-  Serial.print(" P: ");
-  Serial.println(pressure);
-
-  if (client.connect(server, 80)) { 
-    String postStr = apiKey ;
-    postStr += "&field1=" + String(temprature);
-    postStr += "&field2=" + String(humidity);
-    postStr += "&field3=" + String(pressure);
-    postStr += "\r\n\r\n" ;
- 
-    client.println("POST /update HTTP/1.1") ;
-    client.println("Host: api.thingspeak.com") ;
-    client.println("Connection: close") ;
-    client.println("X-THINGSPEAKAPIKEY: " + apiKey) ;
-    client.println("Content-Type: application/x-www-form-urlencoded") ;
-    client.print("Content-Length: ") ;
-    client.println(postStr.length()) ;
-    client.println("") ;
-    client.print(postStr) ;
-  }
-  client.stop();
- 
-  delay(30 * 1000);
-  
-  }
-
-  calibration_t getCalibrationData(void){
-
-    calibration_t results;
-    uint8_t read_data[33];
-    uint8_t i;
-
-    i = 0;
+void loop()
+{
+    double temp_act = 0.0, press_act = 0.0,hum_act=0.0;
+    signed long int temp_cal;
+    unsigned long int press_cal,hum_cal;
     
-    // 校正データ読み込み 
-    Wire.beginTransmission(ADDRESS_I2C);
+    readData(rawData);
+    
+    temp_cal = calibration_T(rawData->temperature_raw, calibrations);
+    press_cal = calibration_P(rawData->pressure_raw, calibrations);
+    hum_cal = calibration_H(rawData->humminity_raw, calibrations);
+    temp_act = (double)temp_cal / 100.0;
+    press_act = (double)press_cal / 100.0;
+    hum_act = (double)hum_cal / 1024.0;
+    Serial.print("TEMP : ");
+    Serial.print(temp_act);
+    Serial.print(" DegC  PRESS : ");
+    Serial.print(press_act);
+    Serial.print(" hPa  HUM : ");
+    Serial.print(hum_act);
+    Serial.println(" %");    
+    
+    delay(1000);
+}
+void readTrim(struct calibration_t* calibrations)
+{
+    uint8_t data[32],i=0;                      // Fix 2014/04/06
+    Wire.beginTransmission(BME280_ADDRESS);
     Wire.write(0x88);
-    Wire.endTransmission(false);
-    Wire.requestFrom(ADDRESS_I2C, 24, false);
-    while (Wire.available()){
-      read_data[i] = Wire.read();
-      i++;
+    Wire.endTransmission();
+    Wire.requestFrom(BME280_ADDRESS,24);       // Fix 2014/04/06
+    while(Wire.available()){
+        data[i] = Wire.read();
+        i++;
     }
-    //Serial.print(i);
-    Wire.endTransmission(true);
-
-    Wire.beginTransmission(ADDRESS_I2C);
-    Wire.write(0xA1);
-    Wire.endTransmission(false);
-    Wire.requestFrom(ADDRESS_I2C, 1, false);
-    read_data[i] = Wire.read();
-    i++;
-    Wire.endTransmission(true);
     
-    Wire.beginTransmission(ADDRESS_I2C);
+    Wire.beginTransmission(BME280_ADDRESS);    // Add 2014/04/06
+    Wire.write(0xA1);                          // Add 2014/04/06
+    Wire.endTransmission();                    // Add 2014/04/06
+    Wire.requestFrom(BME280_ADDRESS,1);        // Add 2014/04/06
+    data[i] = Wire.read();                     // Add 2014/04/06
+    i++;                                       // Add 2014/04/06
+    
+    Wire.beginTransmission(BME280_ADDRESS);
     Wire.write(0xE1);
-    Wire.endTransmission(false);
-    Wire.requestFrom(ADDRESS_I2C, 7, false);
-    while (Wire.available()){
-      read_data[i] = Wire.read();
-      i++;
+    Wire.endTransmission();
+    Wire.requestFrom(BME280_ADDRESS,7);        // Fix 2014/04/06
+    while(Wire.available()){
+        data[i] = Wire.read();
+        i++;    
     }
-    Wire.endTransmission(true);
+    calibrations->dig_T1 = (data[1] << 8) | data[0];
+    calibrations->dig_T2 = (data[3] << 8) | data[2];
+    calibrations->dig_T3 = (data[5] << 8) | data[4];
+    calibrations->dig_P1 = (data[7] << 8) | data[6];
+    calibrations->dig_P2 = (data[9] << 8) | data[8];
+    calibrations->dig_P3 = (data[11]<< 8) | data[10];
+    calibrations->dig_P4 = (data[13]<< 8) | data[12];
+    calibrations->dig_P5 = (data[15]<< 8) | data[14];
+    calibrations->dig_P6 = (data[17]<< 8) | data[16];
+    calibrations->dig_P7 = (data[19]<< 8) | data[18];
+    calibrations->dig_P8 = (data[21]<< 8) | data[20];
+    calibrations->dig_P9 = (data[23]<< 8) | data[22];
+    calibrations->dig_H1 = data[24];
+    calibrations->dig_H2 = (data[26]<< 8) | data[25];
+    calibrations->dig_H3 = data[27];
+    calibrations->dig_H4 = (data[28]<< 4) | (0x0F & data[29]);
+    calibrations->dig_H5 = (data[30] << 4) | ((data[29] >> 4) & 0x0F); // Fix 2014/04/06
+    calibrations->dig_H6 = data[31];                                   // Fix 2014/04/06
+}
+void writeReg(uint8_t reg_address, uint8_t data)
+{
+    Wire.beginTransmission(BME280_ADDRESS);
+    Wire.write(reg_address);
+    Wire.write(data);
+    Wire.endTransmission();    
+}
 
-    results.dig_T1 = read_data[1] << 8 | read_data[0];
-    results.dig_T2 = read_data[3] << 8 | read_data[2];
-    results.dig_T3 = read_data[5] << 8 | read_data[4];
 
-    results.dig_P1 = (read_data[7] << 8) | read_data[6];
-    results.dig_P2 = (read_data[9] << 8) | read_data[8];
-    results.dig_P3 = (read_data[11]<< 8) | read_data[10];
-    results.dig_P4 = (read_data[13]<< 8) | read_data[12];
-    results.dig_P5 = (read_data[15]<< 8) | read_data[14];
-    results.dig_P6 = (read_data[17]<< 8) | read_data[16];
-    results.dig_P7 = (read_data[19]<< 8) | read_data[18];
-    results.dig_P8 = (read_data[21]<< 8) | read_data[20];
-    results.dig_P9 = (read_data[23]<< 8) | read_data[22];
+void readData(struct rawData_t* rawData)
+{
+    int i = 0;
+    uint32_t data[8];
+    Wire.beginTransmission(BME280_ADDRESS);
+    Wire.write(0xF7);
+    Wire.endTransmission();
+    Wire.requestFrom(BME280_ADDRESS,8);
+    while(Wire.available()){
+        data[i] = Wire.read();
+        i++;
+    }
+    rawData->pressure_raw = (data[0] << 12) | (data[1] << 4) | (data[2] >> 4);
+    rawData->temperature_raw = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4);
+    rawData->humminity_raw  = (data[6] << 8) | data[7];
+}
 
-    results.dig_H1 = read_data[24];
-    results.dig_H2 = (read_data[26]<< 8) | read_data[25];
-    results.dig_H3 = read_data[27];
-    //results.dig_H4 = (read_data[28]<< 4) | (0x0F & read_data[29]);
-    //results.dig_H5 = (read_data[30] << 4) | ((read_data[29] >> 4) & 0x0F);
-    results.dig_H6 = read_data[32];
 
-    int16_t dig_H4_lsb;
-    int16_t dig_H4_msb;
-    int16_t dig_H5_lsb;
-    int16_t dig_H5_msb;
-
-    dig_H4_msb = (int16_t)(int8_t)read_data[28] * 16;
-    dig_H4_lsb = (int16_t)(read_data[29] & 0x0F);
-    results.dig_H4 = dig_H4_msb | dig_H4_lsb;
-
-    dig_H5_msb = (int16_t)(int8_t)read_data[31] * 16;
-    dig_H5_lsb = (int16_t)(read_data[30] >> 4);
-    results.dig_H5 = dig_H5_msb | dig_H5_lsb;
+signed long int calibration_T(signed long int adc_T, struct calibration_t* trims)
+{
     
-    return results;
-
-  }
-  
-int32_t compensateTemperature(uint32_t rawData, struct calibration_t *calibrations){
-  int32_t var1;
-  int32_t var2;
-  int32_t temperature;
-  int32_t temperature_min = -4000;
-  int32_t temperature_max = 8500;
-
-  var1 = (int32_t)((rawData / 8) - ((int32_t)calibrations->dig_T1 * 2));
-  var1 = (var1 * ((int32_t)calibrations->dig_T2)) / 2048;
-  var2 = (int32_t)((rawData / 16) - ((int32_t)calibrations->dig_T1));
-  var2 = (((var2 * var2) / 4096) * ((int32_t)calibrations->dig_T3)) / 16384;
-  calibrations->t_fine = var1 + var2;
-  temperature = (calibrations->t_fine * 5 + 128) / 256;
-
-  if (temperature < temperature_min)
-    temperature = temperature_min;
-  else if (temperature > temperature_max)
-    temperature = temperature_max;
-
-  return temperature;
+    signed long int var1, var2, T;
+    var1 = ((((adc_T >> 3) - ((signed long int)trims->dig_T1<<1))) * ((signed long int)trims->dig_T2)) >> 11;
+    var2 = (((((adc_T >> 4) - ((signed long int)trims->dig_T1)) * ((adc_T>>4) - ((signed long int)trims->dig_T1))) >> 12) * ((signed long int)trims->dig_T3)) >> 14;
+    
+    trims->t_fine = var1 + var2;
+    T = (trims->t_fine * 5 + 128) >> 8;
+    return T; 
 }
 
-uint32_t compensateHumidity(uint32_t rawData, struct  calibration_t *calibrations){
-  int32_t var1;
-  int32_t var2;
-  int32_t var3;
-  int32_t var4;
-  int32_t var5;
-  uint32_t humidity;
-  uint32_t humidity_max = 100000;
-
-  var1 = calibrations->t_fine - ((int32_t)76800);
-  var2 = (int32_t)(rawData * 16384);
-  var3 = (int32_t)(((int32_t)calibrations->dig_H4) * 1048576);
-  var4 = ((int32_t)calibrations->dig_H5) * var1;
-  var5 = (((var2 - var3) - var4) + (int32_t)16384) / 32768;
-  var2 = (var1 * ((int32_t)calibrations->dig_H6)) / 1024;
-  var3 = (var1 * ((int32_t)calibrations->dig_H3)) / 2048;
-  var4 = ((var2 * (var3 + (int32_t)32768)) / 1024) + (int32_t)2097152;
-  var2 = ((var4 * ((int32_t)calibrations->dig_H2)) + 8192) / 16384;
-  var3 = var5 * var2;
-  var4 = ((var3 / 32768) * (var3 / 32768)) / 128;
-  var5 = var3 - ((var4 * ((int32_t)calibrations->dig_H1)) / 16);
-  var5 = (var5 < 0 ? 0 : var5);
-  var5 = (var5 > 419430400 ? 419430400 : var5);
-  humidity = (uint32_t)(var5 / 4096);
-
-  if (humidity > humidity_max)
-    humidity = humidity_max;
-
-  return humidity;
-}
-
-uint32_t compensatePressure(uint32_t rawData, struct calibration_t *calibrations){
-  int32_t var1;
-  int32_t var2;
-  int32_t var3;
-  int32_t var4;
-  uint32_t var5;
-  uint32_t pressure;
-  uint32_t pressure_min = 30000;
-  uint32_t pressure_max = 110000;
-
-  var1 = (((int32_t)calibrations->t_fine) / 2) - (int32_t)64000;
-  var2 = (((var1 / 4) * (var1 / 4)) / 2048) * ((int32_t)calibrations->dig_P6);
-  var2 = var2 + ((var1 * ((int32_t)calibrations->dig_P5)) * 2);
-  var2 = (var2 / 4) + (((int32_t)calibrations->dig_P4) * 65536);
-  var3 = (calibrations->dig_P3 * (((var1 / 4) * (var1 / 4)) / 8192)) / 8;
-  var4 = (((int32_t)calibrations->dig_P2) * var1) / 2;
-  var1 = (var3 + var4) / 262144;
-  var1 = (((32768 + var1)) * ((int32_t)calibrations->dig_P1)) / 32768;
-   /* avoid exception caused by division by zero */
-  if (var1) {
-    var5 = (uint32_t)((uint32_t)1048576) - rawData;
-    pressure = ((uint32_t)(var5 - (uint32_t)(var2 / 4096))) * 3125;
-    if (pressure < 0x80000000)
-      pressure = (pressure << 1) / ((uint32_t)var1);
+unsigned long int calibration_P(signed long int adc_P, struct calibration_t* trims)
+{
+    signed long int var1, var2;
+    unsigned long int P;
+    var1 = (((signed long int)trims->t_fine)>>1) - (signed long int)64000;
+    var2 = (((var1>>2) * (var1>>2)) >> 11) * ((signed long int)trims->dig_P6);
+    var2 = var2 + ((var1*((signed long int)trims->dig_P5))<<1);
+    var2 = (var2>>2)+(((signed long int)trims->dig_P4)<<16);
+    var1 = (((trims->dig_P3 * (((var1>>2)*(var1>>2)) >> 13)) >>3) + ((((signed long int)trims->dig_P2) * var1)>>1))>>18;
+    var1 = ((((32768+var1))*((signed long int)trims->dig_P1))>>15);
+    if (var1 == 0)
+    {
+        return 0;
+    }    
+    P = (((unsigned long int)(((signed long int)1048576)-adc_P)-(var2>>12)))*3125;
+    if(P<0x80000000)
+    {
+       P = (P << 1) / ((unsigned long int) var1);   
+    }
     else
-      pressure = (pressure / (uint32_t)var1) * 2;
+    {
+        P = (P / (unsigned long int)var1) * 2;    
+    }
+    var1 = (((signed long int)trims->dig_P9) * ((signed long int)(((P>>3) * (P>>3))>>13)))>>12;
+    var2 = (((signed long int)(P>>2)) * ((signed long int)trims->dig_P8))>>13;
+    P = (unsigned long int)((signed long int)P + ((var1 + var2 + trims->dig_P7) >> 4));
+    return P;
+}
 
-    var1 = (((int32_t)calibrations->dig_P9) * ((int32_t)(((pressure / 8) * (pressure / 8)) / 8192))) / 4096;
-    var2 = (((int32_t)(pressure / 4)) * ((int32_t)calibrations->dig_P8)) / 8192;
-    pressure = (uint32_t)((int32_t)pressure + ((var1 + var2 + calibrations->dig_P7) / 16));
-
-    if (pressure < pressure_min)
-      pressure = pressure_min;
-    else if (pressure > pressure_max)
-      pressure = pressure_max;
-  } else {
-    pressure = pressure_min;
-  }
-
-  return pressure;
+unsigned long int calibration_H(signed long int adc_H, struct calibration_t* trims)
+{
+    signed long int v_x1;
+    
+    v_x1 = (trims->t_fine - ((signed long int)76800));
+    v_x1 = (((((adc_H << 14) -(((signed long int)trims->dig_H4) << 20) - (((signed long int)trims->dig_H5) * v_x1)) + 
+              ((signed long int)16384)) >> 15) * (((((((v_x1 * ((signed long int)trims->dig_H6)) >> 10) * 
+              (((v_x1 * ((signed long int)trims->dig_H3)) >> 11) + ((signed long int) 32768))) >> 10) + (( signed long int)2097152)) * 
+              ((signed long int) trims->dig_H2) + 8192) >> 14));
+   v_x1 = (v_x1 - (((((v_x1 >> 15) * (v_x1 >> 15)) >> 7) * ((signed long int)trims->dig_H1)) >> 4));
+   v_x1 = (v_x1 < 0 ? 0 : v_x1);
+   v_x1 = (v_x1 > 419430400 ? 419430400 : v_x1);
+   return (unsigned long int)(v_x1 >> 12);   
 }
