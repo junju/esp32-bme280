@@ -2,6 +2,7 @@
 #include <WiFi.h>
 
 #define BME280_ADDRESS 0x76
+#define STATUS_LED 13
 
 static const char* ssid     = "";
 static const char* password = "";
@@ -66,6 +67,7 @@ void setup()
     rawData = &inits_rawData;
     
     Serial.begin(115200);
+    pinMode(STATUS_LED, OUTPUT);
     Wire.begin(21,22);
     
     writeReg(0xF2,ctrl_hum_reg);
@@ -76,11 +78,14 @@ void setup()
 
   WiFi.begin(ssid, password) ;
   while (WiFi.status() != WL_CONNECTED){
-    delay(500);
+    digitalWrite(STATUS_LED, HIGH);
+    delay(250);
+    digitalWrite(STATUS_LED, LOW);
+    delay(250); 
     Serial.print(WiFi.status());
   }
   Serial.println("\n\nWiFi connected.") ;
-
+  digitalWrite(STATUS_LED, HIGH);
 }
 
 
